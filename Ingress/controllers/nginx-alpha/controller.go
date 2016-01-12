@@ -42,15 +42,25 @@ http {
   server_names_hash_max_size 512;
   server_names_hash_bucket_size 64;
 
-{{range $ing := .Items}}
+	server {
+		listen 80;
+		server_name _;
+		location / {
+			root /default_site;
+		}
+	}
+
+{{range $k, $ing := .}}
 {{range $rule := $ing.Spec.Rules}}
   server {
     listen 80;
     server_name {{$rule.Host}};
 {{ range $path := $rule.HTTP.Paths }}
     location {{$path.Path}} {
+		  resolver 192.168.0.2;
       proxy_set_header Host $host;
-      proxy_pass http://{{$path.Backend.ServiceName}}.{{$ing.Namespace}}.svc.cluster.local;
+      set $backend "http://{{$path.Backend.ServiceName}}.{{$ing.Namespace}}.svc.cluster.local";
+      proxy_pass $backend;
     }{{end}}
   }{{end}}{{end}}
 }`
@@ -87,9 +97,26 @@ func main() {
 			continue
 		}
 		known = ingresses
+
+		knownHosts := make(map[string]extensions.Ingress)
+		// we need a loop to see deselect all duplicate entries
+		for _, item := range ingresses.Items {
+			for _, rule := range item.Spec.Rules {
+				if v, ok := knownHosts[rule.Host]; ok {
+					knownTS := v.ObjectMeta.CreationTimestamp
+					newTS := item.ObjectMeta.CreationTimestamp
+					if newTS.Before(knownTS) {
+						knownHosts[rule.Host] = item
+					}
+				} else {
+					knownHosts[rule.Host] = item
+				}
+			}
+		}
+
 		if w, err := os.Create("/etc/nginx/nginx.conf"); err != nil {
 			log.Fatalf("Failed to open %v: %v", nginxConf, err)
-		} else if err := tmpl.Execute(w, ingresses); err != nil {
+		} else if err := tmpl.Execute(w, knownHosts); err != nil {
 			log.Fatalf("Failed to write template %v", err)
 		}
 		shellOut("nginx -s reload")
